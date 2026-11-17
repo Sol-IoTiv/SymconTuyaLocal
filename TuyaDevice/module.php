@@ -48,6 +48,9 @@ class TuyaDevice extends IPSModule
         // native parent automatically; GetConfigurationForParent keeps it closed
         // until LiveMode is enabled. No external gateway is required.
         $this->ensureClientSocket();
+        // ApplyChanges resets the protocol session: close the previous TCP
+        // connection too, so an old session key is never used on a new handshake.
+        $this->configureClientSocket(false);
 
         if (!IPS_VariableProfileExists('Tuya.ColorTemp')) {
             IPS_CreateVariableProfile('Tuya.ColorTemp', VARIABLETYPE_INTEGER);
@@ -81,6 +84,7 @@ class TuyaDevice extends IPSModule
                 }
             }
             $this->ensureClientSocket();
+            $this->configureClientSocket(true);
             $this->SetTimerInterval('Live', 1000);
             if (IPS_GetKernelRunlevel() === KR_READY) {
                 $this->LiveTick();
@@ -227,6 +231,21 @@ class TuyaDevice extends IPSModule
             'Open' => $this->ReadPropertyBoolean('LiveMode')
                 && $this->host() !== '' && $this->ReadPropertyString('DeviceID') !== ''
                 && strlen($this->ReadPropertyString('LocalKey')) === 16]);
+    }
+
+    private function configureClientSocket(bool $open): void
+    {
+        $parent = $this->ensureClientSocket();
+        $changed = false;
+        foreach (['Host' => $this->host(), 'Port' => 6668, 'Open' => $open] as $name => $value) {
+            if (IPS_GetProperty($parent, $name) !== $value) {
+                IPS_SetProperty($parent, $name, $value);
+                $changed = true;
+            }
+        }
+        if ($changed) {
+            IPS_ApplyChanges($parent);
+        }
     }
 
     /** One-second watchdog; incoming reports themselves are processed immediately. */

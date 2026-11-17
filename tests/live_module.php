@@ -8,7 +8,7 @@ const VARIABLETYPE_BOOLEAN = 0;
 const VARIABLETYPE_INTEGER = 1;
 const VARIABLETYPE_STRING = 3;
 const KL_WARNING = 10203;
-$runtime = ['parentStatus' => 102, 'parent' => 2, 'created' => 0, 'switches' => [], 'locked' => false];
+$runtime = ['parentStatus' => 102, 'parent' => 2, 'created' => 0, 'properties' => ['Host' => 'unused', 'Port' => 6668, 'Open' => false], 'applies' => 0, 'switches' => [], 'locked' => false];
 function IPS_GetKernelRunlevel() { return KR_READY; }
 function IPS_GetInstance($id) { global $runtime; return $id === 1 ? ['ConnectionID' => $runtime['parent']] : ['InstanceStatus' => $runtime['parentStatus'], 'ModuleInfo' => ['ModuleID' => '{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}']]; }
 function IPS_GetName($id) { return 'Test device'; }
@@ -17,8 +17,9 @@ function IPS_SetName($id, $name) {}
 function IPS_ConnectInstance($child, $parent) { global $runtime; $runtime['parent'] = $parent; }
 function IPS_SemaphoreEnter($name, $timeout) { global $runtime; if ($runtime['locked']) { return false; } return $runtime['locked'] = true; }
 function IPS_SemaphoreLeave($name) { global $runtime; $runtime['locked'] = false; }
-function IPS_SetProperty($id, $name, $value) { global $runtime; $runtime['switches'][] = [$name, $value]; }
-function IPS_ApplyChanges($id) {}
+function IPS_GetProperty($id, $name) { global $runtime; return $runtime['properties'][$name]; }
+function IPS_SetProperty($id, $name, $value) { global $runtime; $runtime['switches'][] = [$name, $value]; $runtime['properties'][$name] = $value; }
+function IPS_ApplyChanges($id) { global $runtime; $runtime['applies']++; }
 
 class ModuleBase
 {
@@ -68,6 +69,15 @@ checkLive($runtime['parent'] === 2 && $runtime['created'] === 1
     && $runtime['switches'] === [['Open', false], ['Host', 'unused'], ['Port', 6668]], 'Legacy instance receives its own closed socket');
 (new \ReflectionMethod($m, 'ensureClientSocket'))->invoke($m);
 checkLive($runtime['created'] === 1, 'Apply does not duplicate native sockets');
+$runtime['switches'] = [];
+$configure = new \ReflectionMethod($m, 'configureClientSocket');
+$configure->invoke($m, true);
+checkLive($runtime['properties']['Open'] === true, 'Enabling live opens the existing native socket');
+$applies = $runtime['applies'];
+$configure->invoke($m, true);
+checkLive($runtime['applies'] === $applies, 'Stable configuration does not reconnect');
+$configure->invoke($m, false);
+checkLive($runtime['properties']['Open'] === false, 'Disabling live closes the existing native socket');
 $runtime['switches'] = [];
 $parentConfig = json_decode($m->GetConfigurationForParent(), true);
 checkLive($parentConfig['Open'] === true && $parentConfig['Port'] === 6668, 'Native socket configuration in live mode');
