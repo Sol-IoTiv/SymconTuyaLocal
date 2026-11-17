@@ -13,6 +13,117 @@ class TuyaLocalClient
     private string $key;
     private string $sk = '';
     private int $seq = 0;
+    private string $phase = '';
+    private string $nonce = '';
+    private string $incoming = '';
+
+    /** Serializable protocol state for Symcon's native, persistent Client Socket. */
+    public function streamState(): string
+    {
+        return json_encode(['sk' => base64_encode($this->sk), 'seq' => $this->seq,
+            'phase' => $this->phase, 'nonce' => base64_encode($this->nonce),
+            'incoming' => base64_encode($this->incoming)]);
+    }
+
+    public function restoreStream(string $state): void
+    {
+        $s = json_decode($state, true, 512, JSON_THROW_ON_ERROR);
+        $this->sk = base64_decode($s['sk'], true);
+        $this->seq = (int) $s['seq'];
+        $this->phase = $s['phase'];
+        $this->nonce = base64_decode($s['nonce'], true);
+        $this->incoming = base64_decode($s['incoming'], true);
+    }
+
+    public function streamReady(): bool
+    {
+        return $this->phase === 'ready';
+    }
+
+    public function startStream(): array
+    {
+        $this->sk = $this->key;
+        $this->seq = 0;
+        $this->incoming = '';
+        if ($this->version === '3.3') {
+            $this->phase = 'ready';
+            return [];
+        }
+        $this->phase = 'handshake';
+        $this->nonce = random_bytes(16);
+        return [$this->encodePacket(3, $this->nonce)];
+    }
+
+    /** Returns handshake replies and ordered DP reports; never actuator commands. */
+    public function feedStream(string $bytes): array
+    {
+        $this->incoming .= $bytes;
+        if (strlen($this->incoming) > 262144) {
+            throw new Exception('Empfangspuffer zu groß');
+        }
+        $packets = [];
+        $reports = [];
+        $received = false;
+        while (($m = $this->unpack($this->incoming)) !== null) {
+            $received = true;
+            if ($this->phase === 'handshake' && $m['cmd'] === 4) {
+                if (strlen($m['data']) < 48 || !hash_equals(hash_hmac('sha256', $this->nonce, $this->key, true), substr($m['data'], 16, 32))) {
+                    throw new Exception('HMAC ungültig (Local Key falsch?)');
+                }
+                $rn = substr($m['data'], 0, 16);
+                $packets[] = $this->encodePacket(5, hash_hmac('sha256', $rn, $this->key, true));
+                if ($this->version === '3.5') {
+                    $tag = '';
+                    $this->sk = substr(openssl_encrypt($this->nonce ^ $rn, 'aes-128-gcm', $this->key, OPENSSL_RAW_DATA, substr($this->nonce, 0, 12), $tag), 0, 16);
+                } else {
+                    $this->sk = substr($this->ecb($this->nonce ^ $rn, $this->key), 0, 16);
+                }
+                $this->phase = 'ready';
+            } elseif ($this->streamReady()) {
+                $j = json_decode($m['data'], true);
+                $dps = $j['data']['dps'] ?? $j['dps'] ?? null;
+                if (is_array($dps)) {
+                    $reports[] = $dps;
+                }
+            }
+        }
+        return ['packets' => $packets, 'reports' => $reports, 'received' => $received];
+    }
+
+    public function streamQuery(array $refreshDPs = []): array
+    {
+        if (!$this->streamReady()) {
+            throw new Exception('Verbindung noch nicht bereit');
+        }
+        if ($this->version === '3.3') {
+            $payload = json_encode(['gwId' => $this->id, 'devId' => $this->id, 'uid' => $this->id, 't' => (string) time()]);
+            $packets = [$this->encodePacket(10, $this->ecb($payload, $this->key))];
+        } else {
+            $packets = [$this->encodePacket(16, '{}')];
+        }
+        if ($refreshDPs !== []) {
+            $packets[] = $this->encodePacket(18, json_encode(['dpId' => array_values($refreshDPs)]));
+        }
+        return $packets;
+    }
+
+    public function streamHeartbeat(): array
+    {
+        return [$this->encodePacket(9, '{}')];
+    }
+
+    public function streamControl(array $dps): array
+    {
+        if (!$this->streamReady()) {
+            throw new Exception('Verbindung noch nicht bereit');
+        }
+        if ($this->version === '3.3') {
+            $json = json_encode(['devId' => $this->id, 'uid' => $this->id, 't' => (string) time(), 'dps' => (object) $dps]);
+            return [$this->encodePacket(7, '3.3' . str_repeat("\0", 12) . $this->ecb($json, $this->key))];
+        }
+        $json = json_encode(['protocol' => 5, 't' => time(), 'data' => ['dps' => (object) $dps]]);
+        return [$this->encodePacket(13, $this->version . str_repeat("\0", 12) . $json)];
+    }
 
     public function __construct(private string $host, private string $id, string $localKey, private string $version)
     {
@@ -140,6 +251,19 @@ class TuyaLocalClient
 
     private function send(int $cmd, string $payload): void
     {
+        $pkt = $this->encodePacket($cmd, $payload);
+        $offset = 0;
+        while ($offset < strlen($pkt)) {
+            $written = fwrite($this->sock, substr($pkt, $offset));
+            if ($written === false || $written === 0) {
+                throw new Exception('Senden fehlgeschlagen');
+            }
+            $offset += $written;
+        }
+    }
+
+    private function encodePacket(int $cmd, string $payload): string
+    {
         $this->seq++;
         if ($this->version === '3.5') {
             $iv = random_bytes(12);
@@ -155,7 +279,7 @@ class TuyaLocalClient
             $body = pack('NNNN', 0x55AA, $this->seq, $cmd, strlen($payload) + 8) . $payload;
             $pkt = $body . pack('N', crc32($body)) . pack('N', 0xAA55);
         }
-        fwrite($this->sock, $pkt);
+        return $pkt;
     }
 
     private function read(float $timeout, ?int $want): array
@@ -193,10 +317,16 @@ class TuyaLocalClient
                 return null;
             }
             $h = unpack('nx/Nseq/Ncmd/Nlen', substr($buf, 4, 14));
+            if ($h['len'] < 28 || $h['len'] > 262144) {
+                throw new Exception('Ungültige Paketlänge');
+            }
             if (strlen($buf) < 22 + $h['len']) {
                 return null;
             }
             $hdr = substr($buf, 4, 14);
+            if (substr($buf, 18 + $h['len'], 4) !== pack('N', 0x9966)) {
+                throw new Exception('Ungültiges Paketende');
+            }
             $body = substr($buf, 18, $h['len']);
             $buf = substr($buf, 22 + $h['len']);
             $pt = openssl_decrypt(substr($body, 12, -16), 'aes-128-gcm', $this->sk, OPENSSL_RAW_DATA, substr($body, 0, 12), substr($body, -16), $hdr);
@@ -209,10 +339,20 @@ class TuyaLocalClient
             throw new Exception('ungültiger Header');
         }
         $h = unpack('Nseq/Ncmd/Nlen', substr($buf, 4, 12));
+        $trailer = $this->version === '3.4' ? 36 : 8;
+        if ($h['len'] < $trailer || $h['len'] > 262144) {
+            throw new Exception('Ungültige Paketlänge');
+        }
         if (strlen($buf) < 16 + $h['len']) {
             return null;
         }
         $data = substr($buf, 16, $h['len']);
+        $body = substr($buf, 0, 16 + $h['len'] - $trailer);
+        $checksum = $this->version === '3.4' ? hash_hmac('sha256', $body, $this->sk, true) : pack('N', crc32($body));
+        if (substr($data, -4) !== pack('N', 0xAA55)
+            || !hash_equals($checksum, substr($data, -$trailer, $trailer - 4))) {
+            throw new Exception('Ungültige Paket-Prüfsumme');
+        }
         $buf = substr($buf, 16 + $h['len']);
         $p = substr($data, 0, $this->version === '3.4' ? -36 : -8);
         if (strlen($p) >= 4 && !(unpack('N', substr($p, 0, 4))[1] & 0xFFFFFF00)) {

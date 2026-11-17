@@ -1,5 +1,7 @@
 {
   "elements": [
+    { "type": "CheckBox", "name": "LiveMode", "caption": "Live-Meldungen über dauerhaften Client Socket empfangen" },
+    { "type": "NumberSpinner", "name": "LiveRefreshInterval", "caption": "Zusätzliche Statusabfrage im Live-Modus alle", "minimum": 30, "suffix": " s" },
     { "type": "CheckBox", "name": "SyncPaintDP61", "caption": "Dreamcolor DP61 verwenden (Anzeige: letzte Auswahl; Bedienung: gesamtes Band)" },
     { "type": "CheckBox", "name": "RGBBrightnessDP24", "caption": "RGB-Helligkeit über Farb-Datenpunkt 24 steuern (Farbton und Sättigung erhalten)" },
     { "type": "ValidationTextBox", "name": "DeviceID", "caption": "Geräte-ID" },
@@ -8,7 +10,7 @@
     { "type": "ValidationTextBox", "name": "MAC", "caption": "MAC-Adresse" },
     { "type": "Select", "name": "Version", "caption": "Protokoll", "options": [
       { "caption": "automatisch", "value": "auto" }, { "caption": "3.3", "value": "3.3" }, { "caption": "3.4", "value": "3.4" }, { "caption": "3.5", "value": "3.5" } ] },
-    { "type": "NumberSpinner", "name": "Interval", "caption": "Statusabfrage alle", "minimum": 5, "suffix": " s" },
+    { "type": "NumberSpinner", "name": "Interval", "caption": "Statusabfrage im Polling-Modus alle", "minimum": 5, "suffix": " s" },
     { "type": "NumberSpinner", "name": "CTMin", "caption": "Farbtemperatur warm", "minimum": 1000, "maximum": 10000, "suffix": " K" },
     { "type": "NumberSpinner", "name": "CTMax", "caption": "Farbtemperatur kalt", "minimum": 1000, "maximum": 10000, "suffix": " K" },
     { "type": "CheckBox", "name": "OfflineAsOff", "caption": "Bei Nichterreichbarkeit als „aus“ anzeigen" }
@@ -17,6 +19,7 @@
     { "type": "Button", "caption": "Status abfragen", "onClick": "TUYA_Update($id);" }
   ],
   "status": [
+    { "code": 104, "icon": "inactive", "caption": "Live-Verbindung wird aufgebaut" },
     { "code": 102, "icon": "active", "caption": "Verbunden" },
     { "code": 200, "icon": "error", "caption": "Gerät nicht erreichbar" },
     { "code": 201, "icon": "inactive", "caption": "Geräte-ID und Local Key (16 Zeichen) eintragen" }

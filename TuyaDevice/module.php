@@ -19,6 +19,8 @@ class TuyaDevice extends IPSModule
         $this->RegisterPropertyString('MAC', '');
         $this->RegisterPropertyString('Version', 'auto');
         $this->RegisterPropertyInteger('Interval', 30);
+        $this->RegisterPropertyBoolean('LiveMode', false);
+        $this->RegisterPropertyInteger('LiveRefreshInterval', 300);
         $this->RegisterPropertyInteger('CTMin', 2700);
         $this->RegisterPropertyInteger('CTMax', 6500);
         $this->RegisterPropertyBoolean('OfflineAsOff', true);
@@ -31,11 +33,17 @@ class TuyaDevice extends IPSModule
         $this->RegisterAttributeString('LastPaintData', '');
 
         $this->RegisterTimer('Poll', 0, 'TUYA_Update($_IPS["TARGET"]);');
+        $this->RegisterTimer('Live', 0, 'TUYA_LiveTick($_IPS["TARGET"]);');
     }
 
     public function ApplyChanges()
     {
         parent::ApplyChanges();
+        $this->SetTimerInterval('Live', 0);
+        $this->SetTimerInterval('Poll', 0);
+        $this->SetBuffer('LiveState', '');
+        $this->SetBuffer('LiveRx', '0');
+        $this->SetBuffer('LiveStarted', '0');
 
         if (!IPS_VariableProfileExists('Tuya.ColorTemp')) {
             IPS_CreateVariableProfile('Tuya.ColorTemp', VARIABLETYPE_INTEGER);
@@ -52,6 +60,34 @@ class TuyaDevice extends IPSModule
             return;
         }
         $this->SetSummary($this->host());
+        if ($this->ReadPropertyBoolean('LiveMode')) {
+            // Determine auto-version before opening the persistent parent connection.
+            if ($this->ReadPropertyString('Version') === 'auto') {
+                $parent = IPS_GetInstance($this->InstanceID)['ConnectionID'];
+                if ($parent > 0 && IPS_GetProperty($parent, 'Open')) {
+                    IPS_SetProperty($parent, 'Open', false);
+                    IPS_ApplyChanges($parent);
+                }
+                try {
+                    $this->client();
+                } catch (Throwable $e) {
+                    $this->offline($e->getMessage());
+                    $this->SetTimerInterval('Live', 5000);
+                    return;
+                }
+            }
+            $this->ConnectParent('{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}');
+            $this->SetTimerInterval('Live', 1000);
+            if (IPS_GetKernelRunlevel() === KR_READY) {
+                $this->LiveTick();
+            }
+            return;
+        }
+        $parent = IPS_GetInstance($this->InstanceID)['ConnectionID'];
+        if ($parent > 0 && IPS_GetProperty($parent, 'Open')) {
+            IPS_SetProperty($parent, 'Open', false);
+            IPS_ApplyChanges($parent);
+        }
         $this->SetTimerInterval('Poll', max(5, $this->ReadPropertyInteger('Interval')) * 1000);
         if (IPS_GetKernelRunlevel() === KR_READY) {
             $this->Update();
@@ -72,6 +108,9 @@ class TuyaDevice extends IPSModule
     /** Status vom Gerät holen und Variablen aktualisieren */
     public function Update(): bool
     {
+        if ($this->ReadPropertyBoolean('LiveMode')) {
+            return $this->liveOperation('query');
+        }
         try {
             $dps = $this->client()->query($this->ReadPropertyBoolean('SyncPaintDP61') ? [61] : []);
             $this->apply($dps);
@@ -86,6 +125,10 @@ class TuyaDevice extends IPSModule
     /** Rohe Datenpunkte setzen, z. B. TUYA_SetDPs(12345, ['20' => true]); */
     public function SetDPs(array $dps): bool
     {
+        if ($this->ReadPropertyBoolean('LiveMode')) {
+            // Values change only when confirmed by a received device report.
+            return $this->liveOperation('control', $dps);
+        }
         try {
             $res = $this->client()->set($dps);
             $this->apply($res + $dps);
@@ -147,12 +190,139 @@ class TuyaDevice extends IPSModule
         if (!$this->SetDPs($dps)) {
             throw new Exception('Tuya-Gerät nicht erreichbar');
         }
-        if ($Ident === 'Helligkeit' && $Value > 0) {
+        if (!$this->ReadPropertyBoolean('LiveMode') && $Ident === 'Helligkeit' && $Value > 0) {
             $this->SetValue('Helligkeit', (int) $Value);
         }
     }
 
     // ---------- intern ----------
+
+    public function GetConfigurationForParent()
+    {
+        return json_encode(['Host' => $this->host(), 'Port' => 6668,
+            'Open' => $this->ReadPropertyBoolean('LiveMode')
+                && $this->host() !== '' && $this->ReadPropertyString('DeviceID') !== ''
+                && strlen($this->ReadPropertyString('LocalKey')) === 16]);
+    }
+
+    /** One-second watchdog; incoming reports themselves are processed immediately. */
+    public function LiveTick(): void
+    {
+        if (!$this->ReadPropertyBoolean('LiveMode') || IPS_GetKernelRunlevel() !== KR_READY) {
+            return;
+        }
+        if ($this->ReadPropertyString('Version') === 'auto' && $this->ReadAttributeString('DetectedVersion') === '') {
+            $this->ApplyChanges();
+            return;
+        }
+        if (time() < (int) $this->GetBuffer('LiveRetry')) {
+            return;
+        }
+        $this->liveOperation('tick');
+    }
+
+    public function ReceiveData($JSONString)
+    {
+        if (!$this->ReadPropertyBoolean('LiveMode')) {
+            return;
+        }
+        $data = json_decode($JSONString, true);
+        if (($data['DataID'] ?? '') !== '{018EF6B5-AB94-40C6-AA53-46943E824ACF}' || !isset($data['Buffer'])) {
+            return;
+        }
+        $bytes = mb_convert_encoding($data['Buffer'], 'ISO-8859-1', 'UTF-8');
+        $this->liveOperation('receive', [], $bytes);
+    }
+
+    private function liveOperation(string $operation, array $dps = [], string $bytes = ''): bool
+    {
+        $lock = 'TuyaLive' . $this->InstanceID;
+        if (!IPS_SemaphoreEnter($lock, 2000)) {
+            return false;
+        }
+        try {
+            $parent = IPS_GetInstance($this->InstanceID)['ConnectionID'];
+            if ($parent === 0) {
+                $this->ConnectParent('{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}');
+                return false;
+            }
+            if (IPS_GetInstance($parent)['InstanceStatus'] !== 102) {
+                $this->SetBuffer('LiveState', '');
+                $this->SetBuffer('LiveStarted', '0');
+                $this->offline('Live-Verbindung unterbrochen');
+                return false;
+            }
+            $c = $this->client();
+            $state = $this->GetBuffer('LiveState');
+            $packets = [];
+            if ($state === '') {
+                $packets = $c->startStream();
+                $this->SetBuffer('LiveStarted', (string) time());
+                $this->SetBuffer('LiveReport', '0');
+                $this->SetBuffer('LiveRx', (string) time());
+                $this->SetStatus(104);
+                if ($c->streamReady()) {
+                    $packets = array_merge($packets, $c->streamQuery($this->ReadPropertyBoolean('SyncPaintDP61') ? [61] : []));
+                    $this->SetBuffer('LiveQuery', (string) time());
+                }
+            } else {
+                $c->restoreStream($state);
+            }
+            if ($operation === 'receive') {
+                $ready = $c->streamReady();
+                $result = $c->feedStream($bytes);
+                $packets = array_merge($packets, $result['packets']);
+                if ($result['received']) {
+                    $this->SetBuffer('LiveRx', (string) time());
+                }
+                if (!$ready && $c->streamReady()) {
+                    $packets = array_merge($packets, $c->streamQuery($this->ReadPropertyBoolean('SyncPaintDP61') ? [61] : []));
+                    $this->SetBuffer('LiveQuery', (string) time());
+                }
+                foreach ($result['reports'] as $report) {
+                    $this->apply($report);
+                    $this->SetBuffer('LiveReport', '1');
+                    $this->SetStatus(102);
+                }
+            } elseif ($c->streamReady() && $operation === 'control') {
+                $packets = array_merge($packets, $c->streamControl($dps));
+            } elseif ($c->streamReady() && ($operation === 'query'
+                || time() - (int) $this->GetBuffer('LiveQuery') >= max(30, $this->ReadPropertyInteger('LiveRefreshInterval')))) {
+                $packets = array_merge($packets, $c->streamQuery($this->ReadPropertyBoolean('SyncPaintDP61') ? [61] : []));
+                $this->SetBuffer('LiveQuery', (string) time());
+            }
+            if ($operation === 'tick' && (($c->streamReady() && time() - (int) $this->GetBuffer('LiveRx') > 45)
+                || ((!$c->streamReady() || $this->GetBuffer('LiveReport') !== '1')
+                    && time() - (int) $this->GetBuffer('LiveStarted') > 10))) {
+                throw new Exception('Live-Verbindung: Antwortzeit überschritten');
+            }
+            if ($c->streamReady() && time() - (int) $this->GetBuffer('LiveHeartbeat') >= 10) {
+                $packets = array_merge($packets, $c->streamHeartbeat());
+                $this->SetBuffer('LiveHeartbeat', (string) time());
+            }
+            // Save protocol state before sending: a response can arrive immediately.
+            $this->SetBuffer('LiveState', $c->streamState());
+            foreach ($packets as $packet) {
+                $this->SendDataToParent(json_encode(['DataID' => '{79827379-F36E-4ADA-8A95-5F8D1DC92FA9}',
+                    'Buffer' => mb_convert_encoding($packet, 'UTF-8', 'ISO-8859-1')]));
+            }
+            return $operation !== 'control' || $c->streamReady();
+        } catch (Throwable $e) {
+            $this->SetBuffer('LiveState', '');
+            $this->SetBuffer('LiveRetry', (string) (time() + 5));
+            $this->offline($e->getMessage());
+            $parent = IPS_GetInstance($this->InstanceID)['ConnectionID'];
+            if ($parent > 0) {
+                IPS_SetProperty($parent, 'Open', false);
+                IPS_ApplyChanges($parent);
+                IPS_SetProperty($parent, 'Open', true);
+                IPS_ApplyChanges($parent);
+            }
+            return false;
+        } finally {
+            IPS_SemaphoreLeave($lock);
+        }
+    }
 
     private function client(): TuyaLocalClient
     {

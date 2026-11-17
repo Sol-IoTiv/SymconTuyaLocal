@@ -28,6 +28,33 @@ die Erweiterungen wieder.
 
 ## Einstellungen der erprobten Controller
 
+### Live-Meldungen (ab Version1.2)
+
+Die Option **Live-Meldungen über dauerhaften Client Socket empfangen** hält eine
+Verbindung pro Gerät offen. Symcon legt dafür einen nativen Client Socket als
+übergeordnete Instanz an. Dessen Host und Port6668 kommen aus der Geräteinstanz.
+App-Änderungen werden über `ReceiveData` sofort verarbeitet. Es wird nicht jede
+Sekunde neu nach dem Status gefragt; der Sekundentimer überwacht nur die Verbindung.
+
+- Live-Modus ist standardmäßig aus. Bisherige Installationen bleiben beim Polling.
+- Bei Live-Modus gilt das normale Polling-Intervall nicht.
+- Eine zusätzliche Statusabfrage erfolgt standardmäßig alle300 Sekunden (mindestens30).
+- Keepalive erfolgt alle10 Sekunden. Bei45 Sekunden ohne gültige Antwort oder
+  10 Sekunden ohne erfolgreichen Verbindungsaufbau wird die Verbindung erneuert.
+- Nach einem Protokollfehler wird ein erneuter Versuch mindestens5 Sekunden verzögert.
+- Befehle und eingehende Meldungen verwenden dieselbe Verbindung und denselben
+  Sitzungsschlüssel. Die Anzeige wird erst durch Geräteberichte bestätigt.
+- Beim Ausschalten des Live-Modus wird der Client Socket geschlossen und das
+  normale Polling wieder verwendet. Nicht zusätzlich mit anderen lokalen Clients
+  auf dasselbe Gerät zugreifen: Manche Controller erlauben nur einen lokalen Client.
+
+Mit den beiden Testgeräten wurden spontane Ein/Aus-, Farb-/Helligkeitsmeldungen
+über eine dreiminütige lesende Dauerverbindung beobachtet, einschließlich DP61
+beim Handlauf. Die neue native Symcon-Anbindung wurde isoliert mit simulierten
+Geräteantworten geprüft; ihr Einsatz in der laufenden Installation muss nach
+dem Update gesondert kontrolliert werden. Es ist keine Garantie für Push-Meldungen
+beliebiger Tuya-Geräte. Dafür bleibt die zusätzliche Statusabfrage verfügbar.
+
 | Einstellung | RGB-Controller „RGB“ | MAGIC SMART LED Stripe 5m |
 |---|---|---|
 | Erprobtes Protokoll | 3.3 | 3.5 |
@@ -82,6 +109,21 @@ Protokoll3.4 und weitere Gerätetypen wurden für diese Erweiterungen nicht live
 
 Die ursprüngliche Client-Implementierung übernimmt bei fehlender Statusantwort die
 angeforderten Steuerwerte. Eine erfolgreiche Befehlsrückgabe allein bestätigt daher
-nicht den Gerätezustand. Diesen anschließend mit einer neuen Statusabfrage prüfen.
+nicht den Gerätezustand. Dies gilt für den bisherigen Polling-Modus. Im Live-Modus
+werden Werte ausschließlich aus Geräteberichten übernommen.
+
+Isolierte Tests mit PHP ohne Geräteverbindung:
+
+```sh
+php tests/rgb.php
+php tests/stream.php
+php tests/live_module.php
+```
+
+Die Stream-Tests prüfen Sitzungsschlüsselaustausch, Fragmentierung, mehrere Pakete
+in einem Datenblock, Zustandswiederherstellung, Keepalive und beschädigte Pakete
+mit realer Kryptografie und einem simulierten Gegenüber (3.3/3.4/3.5).
+Die Adaptertests prüfen Empfang, Befehlsweitergabe ohne optimistische Anzeige,
+Zeitüberschreitung, Neustart, Wiederholungsverzögerung und getrennten Parent.
 
 Formatreferenz: [Tuya SmearFormatter](https://github.com/Tuya-Community/tuya-ray-materials/blob/main/template/PublicPanelStripLamp/src/devices/protocols/parsers/SmearFormatter.ts).
