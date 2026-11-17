@@ -31,8 +31,10 @@ die Erweiterungen wieder.
 ### Live-Meldungen (ab Version1.2)
 
 Die Option **Live-Meldungen über dauerhaften Client Socket empfangen** hält eine
-Verbindung pro Gerät offen. Symcon legt dafür einen nativen Client Socket als
-übergeordnete Instanz an. Dessen Host und Port6668 kommen aus der Geräteinstanz.
+Verbindung pro Gerät offen. Symcon legt automatisch einen nativen Client Socket als
+übergeordnete Instanz an, auch bei bestehenden Geräteinstanzen. Es ist keine
+zusätzliche Gateway-Hardware nötig. Im Polling-Modus bleibt dieser Socket geschlossen.
+Dessen Host und Port6668 kommen aus der Geräteinstanz.
 App-Änderungen werden über `ReceiveData` sofort verarbeitet. Es wird nicht jede
 Sekunde neu nach dem Status gefragt; der Sekundentimer überwacht nur die Verbindung.
 

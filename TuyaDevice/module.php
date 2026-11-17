@@ -44,6 +44,10 @@ class TuyaDevice extends IPSModule
         $this->SetBuffer('LiveState', '');
         $this->SetBuffer('LiveRx', '0');
         $this->SetBuffer('LiveStarted', '0');
+        // The declared I/O requirement also applies in polling mode. Create its
+        // native parent automatically; GetConfigurationForParent keeps it closed
+        // until LiveMode is enabled. No external gateway is required.
+        $this->ConnectParent('{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}');
 
         if (!IPS_VariableProfileExists('Tuya.ColorTemp')) {
             IPS_CreateVariableProfile('Tuya.ColorTemp', VARIABLETYPE_INTEGER);

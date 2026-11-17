@@ -57,6 +57,11 @@ function reportFrame(array $dps): string
     return $body . pack('N', crc32($body)) . pack('N', 0xAA55);
 }
 $m = new ModuleUnderTest();
+$parentConfig = json_decode($m->GetConfigurationForParent(), true);
+checkLive($parentConfig['Open'] === true && $parentConfig['Port'] === 6668, 'Native socket configuration in live mode');
+$m->properties['LiveMode'] = false;
+checkLive(json_decode($m->GetConfigurationForParent(), true)['Open'] === false, 'Polling keeps native socket closed');
+$m->properties['LiveMode'] = true;
 $m->LiveTick();
 checkLive(count($m->packets) === 2, 'Initial query and heartbeat: ' . json_encode($m->debug));
 $frame = reportFrame(['20' => true, '24' => '007803e80384']);
