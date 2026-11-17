@@ -47,7 +47,7 @@ class TuyaDevice extends IPSModule
         // The declared I/O requirement also applies in polling mode. Create its
         // native parent automatically; GetConfigurationForParent keeps it closed
         // until LiveMode is enabled. No external gateway is required.
-        $this->ConnectParent('{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}');
+        $this->ensureClientSocket();
 
         if (!IPS_VariableProfileExists('Tuya.ColorTemp')) {
             IPS_CreateVariableProfile('Tuya.ColorTemp', VARIABLETYPE_INTEGER);
@@ -80,7 +80,7 @@ class TuyaDevice extends IPSModule
                     return;
                 }
             }
-            $this->ConnectParent('{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}');
+            $this->ensureClientSocket();
             $this->SetTimerInterval('Live', 1000);
             if (IPS_GetKernelRunlevel() === KR_READY) {
                 $this->LiveTick();
@@ -201,6 +201,26 @@ class TuyaDevice extends IPSModule
 
     // ---------- intern ----------
 
+    private function ensureClientSocket(): int
+    {
+        $parent = IPS_GetInstance($this->InstanceID)['ConnectionID'];
+        if ($parent > 0) {
+            if (IPS_GetInstance($parent)['ModuleInfo']['ModuleID'] !== '{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}') {
+                throw new Exception('Als Gateway wird ein eigener Client Socket benötigt');
+            }
+            return $parent;
+        }
+        // Explicit creation also migrates instances created before I/O support.
+        $parent = IPS_CreateInstance('{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}');
+        IPS_SetName($parent, 'Tuya TCP - ' . IPS_GetName($this->InstanceID));
+        IPS_SetProperty($parent, 'Open', false);
+        IPS_SetProperty($parent, 'Host', $this->host());
+        IPS_SetProperty($parent, 'Port', 6668);
+        IPS_ApplyChanges($parent);
+        IPS_ConnectInstance($this->InstanceID, $parent);
+        return $parent;
+    }
+
     public function GetConfigurationForParent()
     {
         return json_encode(['Host' => $this->host(), 'Port' => 6668,
@@ -247,7 +267,7 @@ class TuyaDevice extends IPSModule
         try {
             $parent = IPS_GetInstance($this->InstanceID)['ConnectionID'];
             if ($parent === 0) {
-                $this->ConnectParent('{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}');
+                $this->ensureClientSocket();
                 return false;
             }
             if (IPS_GetInstance($parent)['InstanceStatus'] !== 102) {
