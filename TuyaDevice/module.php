@@ -39,6 +39,13 @@ class TuyaDevice extends IPSModule
     public function ApplyChanges()
     {
         parent::ApplyChanges();
+        if (!IPS_VariableProfileExists('Tuya.Available')) {
+            IPS_CreateVariableProfile('Tuya.Available', VARIABLETYPE_BOOLEAN);
+            IPS_SetVariableProfileAssociation('Tuya.Available', false, 'Nicht verfügbar', '', 0xFF0000);
+            IPS_SetVariableProfileAssociation('Tuya.Available', true, 'Verfügbar', '', 0x00AA00);
+        }
+        $this->MaintainVariable('Available', 'Verfügbar', VARIABLETYPE_BOOLEAN, 'Tuya.Available', 0, true);
+        $this->setIfChanged('Available', false);
         $this->SetTimerInterval('Live', 0);
         $this->SetTimerInterval('Poll', 0);
         $this->SetBuffer('LiveState', '');
@@ -62,7 +69,7 @@ class TuyaDevice extends IPSModule
         $this->WriteAttributeString('DetectedVersion', '');
         $ok = $this->ReadPropertyString('DeviceID') !== '' && strlen($this->ReadPropertyString('LocalKey')) === 16;
         if (!$ok) {
-            $this->SetStatus(201);
+            $this->setConnectionStatus(201);
             $this->SetTimerInterval('Poll', 0);
             return;
         }
@@ -121,8 +128,8 @@ class TuyaDevice extends IPSModule
         }
         try {
             $dps = $this->client()->query($this->ReadPropertyBoolean('SyncPaintDP61') ? [61] : []);
+            $this->setConnectionStatus(102);
             $this->apply($dps);
-            $this->SetStatus(102);
             return true;
         } catch (Throwable $e) {
             $this->offline($e->getMessage());
@@ -139,8 +146,8 @@ class TuyaDevice extends IPSModule
         }
         try {
             $res = $this->client()->set($dps);
+            $this->setConnectionStatus(102);
             $this->apply($res + $dps);
-            $this->SetStatus(102);
             return true;
         } catch (Throwable $e) {
             $this->offline($e->getMessage());
@@ -303,7 +310,7 @@ class TuyaDevice extends IPSModule
                 $this->SetBuffer('LiveStarted', (string) time());
                 $this->SetBuffer('LiveReport', '0');
                 $this->SetBuffer('LiveRx', (string) time());
-                $this->SetStatus(104);
+                $this->setConnectionStatus(104);
                 if ($c->streamReady()) {
                     $packets = array_merge($packets, $c->streamQuery($this->ReadPropertyBoolean('SyncPaintDP61') ? [61] : []));
                     $this->SetBuffer('LiveQuery', (string) time());
@@ -323,9 +330,9 @@ class TuyaDevice extends IPSModule
                     $this->SetBuffer('LiveQuery', (string) time());
                 }
                 foreach ($result['reports'] as $report) {
+                    $this->setConnectionStatus(102);
                     $this->apply($report);
                     $this->SetBuffer('LiveReport', '1');
-                    $this->SetStatus(102);
                 }
             } elseif ($c->streamReady() && $operation === 'control') {
                 $packets = array_merge($packets, $c->streamControl($dps));
@@ -534,6 +541,7 @@ class TuyaDevice extends IPSModule
 
     private function offline(string $msg): void
     {
+        $this->setIfChanged('Available', false);
         $this->SendDebug('Fehler', $msg, 0);
         if (preg_match('/HMAC|Entschlüsselung|Protokollversion/', $msg)) {
             $this->WriteAttributeString('DetectedVersion', '');
@@ -548,7 +556,14 @@ class TuyaDevice extends IPSModule
         if ($this->GetStatus() !== 200) {
             $this->LogMessage('nicht erreichbar: ' . $msg, KL_WARNING);
         }
-        $this->SetStatus(200);
+        $this->setConnectionStatus(200);
+    }
+
+    /** Availability follows confirmed communication, not just an open TCP socket. */
+    private function setConnectionStatus(int $status): void
+    {
+        $this->SetStatus($status);
+        $this->setIfChanged('Available', $status === 102);
     }
 
     private function setIfChanged(string $ident, $val): void

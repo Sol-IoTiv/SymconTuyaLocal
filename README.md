@@ -129,3 +129,9 @@ Die Adaptertests prüfen Empfang, Befehlsweitergabe ohne optimistische Anzeige,
 Zeitüberschreitung, Neustart, Wiederholungsverzögerung und getrennten Parent.
 
 Formatreferenz: [Tuya SmearFormatter](https://github.com/Tuya-Community/tuya-ray-materials/blob/main/template/PublicPanelStripLamp/src/devices/protocols/parsers/SmearFormatter.ts).
+
+### Verfügbarkeit für Ereignisbedingungen
+
+Die schreibgeschützte Variable **Verfügbar** (`Available`) wird nach einer bestätigten Geräteantwort wahr. Bei Verbindungsfehlern, Antwort-Timeouts und beim Neustart der Verbindung wird sie falsch. Eine offene TCP-Verbindung allein genügt nicht. Wie der Instanzstatus beschreibt sie den zuletzt erkannten Zustand; Ausfälle werden erst nach ihrer Erkennung angezeigt.
+
+Native Schalt-Ereignisse können mit UND-Bedingungen auf `Verfügbar = Ja` und `Befehlsvariable ≠ Geräte-Statusvariable` begrenzt werden. Rückmelde-Ereignisse sollten ebenfalls `Verfügbar = Ja` prüfen, damit eine optionale Offline-Anzeige als „Aus“ nicht als bestätigter Gerätezustand weitergeleitet wird. Bereits gesendete, noch unbestätigte Befehle werden durch den Vergleich nicht erkannt.
