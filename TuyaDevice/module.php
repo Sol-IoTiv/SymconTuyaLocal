@@ -22,9 +22,13 @@ class TuyaDevice extends IPSModule
         $this->RegisterPropertyInteger('CTMin', 2700);
         $this->RegisterPropertyInteger('CTMax', 6500);
         $this->RegisterPropertyBoolean('OfflineAsOff', true);
+        $this->RegisterPropertyBoolean('RGBBrightnessDP24', false);
+        $this->RegisterPropertyBoolean('SyncPaintDP61', false);
 
         $this->RegisterAttributeString('DetectedVersion', '');
         $this->RegisterAttributeString('KnownDPs', '[]');
+        $this->RegisterAttributeString('LastColourData', '');
+        $this->RegisterAttributeString('LastPaintData', '');
 
         $this->RegisterTimer('Poll', 0, 'TUYA_Update($_IPS["TARGET"]);');
     }
@@ -57,7 +61,11 @@ class TuyaDevice extends IPSModule
     public function GetConfigurationForm()
     {
         $form = json_decode(file_get_contents(__DIR__ . '/form.json'), true);
-        $form['actions'][] = ['type' => 'Label', 'caption' => 'Protokoll: ' . ($this->ReadAttributeString('DetectedVersion') ?: '–') . '   |   Datenpunkte: ' . $this->ReadAttributeString('KnownDPs')];
+        $version = $this->ReadPropertyString('Version');
+        if ($version === 'auto') {
+            $version = $this->ReadAttributeString('DetectedVersion') ?: 'noch nicht erkannt (automatisch)';
+        }
+        $form['actions'][] = ['type' => 'Label', 'caption' => 'Protokoll: ' . $version . '   |   Datenpunkte: ' . $this->ReadAttributeString('KnownDPs')];
         return json_encode($form);
     }
 
@@ -65,7 +73,7 @@ class TuyaDevice extends IPSModule
     public function Update(): bool
     {
         try {
-            $dps = $this->client()->query();
+            $dps = $this->client()->query($this->ReadPropertyBoolean('SyncPaintDP61') ? [61] : []);
             $this->apply($dps);
             $this->SetStatus(102);
             return true;
@@ -98,13 +106,33 @@ class TuyaDevice extends IPSModule
                 $dps = ['20' => (bool) $Value];
                 break;
             case 'Helligkeit':
-                $dps = $Value <= 0 ? ['20' => false] : ['20' => true, '21' => 'white', '22' => max(10, min(1000, (int) $Value * 10))];
+                if ($this->ReadPropertyBoolean('RGBBrightnessDP24')) {
+                    if ($Value <= 0) {
+                        $dps = ['20' => false];
+                    } else {
+                        $hsv = $this->ReadAttributeString('LastColourData');
+                        if (!preg_match('/^[0-9a-f]{12}$/i', $hsv)) {
+                            throw new Exception('Zuerst einen gültigen Farbstatus vom Gerät abfragen');
+                        }
+                        $dps = $this->colourCommand(substr($hsv, 0, 8) . sprintf('%04x', max(10, min(1000, (int) $Value * 10))));
+                    }
+                } else {
+                    $dps = $Value <= 0 ? ['20' => false] : ['20' => true, '21' => 'white', '22' => max(10, min(1000, (int) $Value * 10))];
+                }
                 break;
             case 'Farbtemperatur':
                 $dps = ['21' => 'white', '23' => (int) round(($Value - $min) / max(1, $max - $min) * 1000)];
                 break;
             case 'Farbe':
-                $dps = ['20' => true, '21' => 'colour', '24' => $this->rgbToTuya((int) $Value)];
+                $colour = $this->rgbToTuya((int) $Value);
+                if ($this->ReadPropertyBoolean('RGBBrightnessDP24')) {
+                    $previous = $this->ReadAttributeString('LastColourData');
+                    if (!preg_match('/^[0-9a-f]{12}$/i', $previous)) {
+                        throw new Exception('Zuerst einen gültigen Farbstatus vom Gerät abfragen');
+                    }
+                    $colour = substr($colour, 0, 8) . substr($previous, 8, 4);
+                }
+                $dps = $this->colourCommand($colour);
                 break;
             case 'Update':
                 $this->Update();
@@ -168,6 +196,20 @@ class TuyaDevice extends IPSModule
 
     private function apply(array $dps): void
     {
+        $paint = null;
+        if ($this->ReadPropertyBoolean('SyncPaintDP61')) {
+            if (isset($dps['61']) && is_string($dps['61'])) {
+                $paint = $this->decodePaintColour($dps['61']);
+                if ($paint !== null) {
+                    $this->WriteAttributeString('LastPaintData', $dps['61']);
+                }
+            }
+            // Never overwrite the App's paint selection with the stale DP24 value.
+            unset($dps['24']);
+            if ($paint !== null) {
+                $dps['24'] = $paint['hsv'];
+            }
+        }
         $known = json_decode($this->ReadAttributeString('KnownDPs'), true) ?: [];
         $new = array_values(array_unique(array_merge($known, array_map('strval', array_keys($dps)))));
         sort($new);
@@ -181,7 +223,7 @@ class TuyaDevice extends IPSModule
         if ($isLight) {
             $this->MaintainVariable('Status', 'Status', VARIABLETYPE_BOOLEAN, '~Switch', 1, true);
             $this->EnableAction('Status');
-            if (in_array('22', $new, true)) {
+            if (in_array('22', $new, true) || ($this->ReadPropertyBoolean('RGBBrightnessDP24') && in_array('24', $new, true))) {
                 $this->MaintainVariable('Helligkeit', 'Helligkeit', VARIABLETYPE_INTEGER, '~Intensity.100', 2, true);
                 $this->EnableAction('Helligkeit');
             }
@@ -196,13 +238,17 @@ class TuyaDevice extends IPSModule
             if (isset($dps['20'])) {
                 $this->setIfChanged('Status', (bool) $dps['20']);
             }
-            if (isset($dps['22']) && @$this->GetIDForIdent('Helligkeit')) {
+            if (!$this->ReadPropertyBoolean('RGBBrightnessDP24') && isset($dps['22']) && @$this->GetIDForIdent('Helligkeit')) {
                 $this->setIfChanged('Helligkeit', (int) round($dps['22'] / 10));
             }
             if (isset($dps['23']) && @$this->GetIDForIdent('Farbtemperatur')) {
                 $this->setIfChanged('Farbtemperatur', (int) (round(($min + $dps['23'] / 1000 * ($max - $min)) / 100) * 100));
             }
-            if (isset($dps['24']) && @$this->GetIDForIdent('Farbe') && is_string($dps['24']) && strlen($dps['24']) === 12) {
+            if (isset($dps['24']) && @$this->GetIDForIdent('Farbe') && is_string($dps['24']) && preg_match('/^[0-9a-f]{12}$/i', $dps['24'])) {
+                $this->WriteAttributeString('LastColourData', $dps['24']);
+                if ($this->ReadPropertyBoolean('RGBBrightnessDP24')) {
+                    $this->setIfChanged('Helligkeit', (int) round(hexdec(substr($dps['24'], 8, 4)) / 10));
+                }
                 $this->setIfChanged('Farbe', $this->tuyaToRgb($dps['24']));
             }
             return;
@@ -217,6 +263,60 @@ class TuyaDevice extends IPSModule
                 $this->setIfChanged($ident, $val);
             }
         }
+    }
+
+    /** Normal colour controls address the entire strip, never just the last segment. */
+    private function colourCommand(string $hsv): array
+    {
+        if (!$this->ReadPropertyBoolean('SyncPaintDP61')) {
+            return ['20' => true, '21' => 'colour', '24' => $hsv];
+        }
+        $encoded = $this->ReadAttributeString('LastPaintData');
+        if ($this->decodePaintColour($encoded) === null) {
+            throw new Exception('Zuerst einen gültigen DP61-Farbstatus vom Gerät abfragen');
+        }
+        $raw = base64_decode($encoded, true);
+        $paint = pack('C5', 0, 1, 0, ord($raw[3]), 0) . hex2bin($hsv);
+        return ['20' => true, '21' => 'colour', '61' => base64_encode($paint)];
+    }
+
+    /** Decode Tuya's documented SmearFormatter v0, colour/card modes only. */
+    private function decodePaintColour(string $encoded): ?array
+    {
+        $raw = base64_decode($encoded, true);
+        if ($raw === false || strlen($raw) < 11 || ord($raw[0]) !== 0
+            || !in_array(ord($raw[1]), [1, 2], true) || ord($raw[2]) > 1) {
+            return null;
+        }
+        $segments = ord($raw[3]);
+        $action = ord($raw[4]);
+        $hsv = unpack('nh/ns/nv', substr($raw, 5, 6));
+        if ($segments < 1 || $hsv['h'] > 360 || $hsv['s'] > 1000 || $hsv['v'] > 1000) {
+            return null;
+        }
+        if ($action === 0 && strlen($raw) === 11) {
+            $description = 'DP61: alle Segmente';
+        } elseif ($action === 1 && strlen($raw) >= 13) {
+            $selection = ord($raw[11]);
+            $indices = array_values(unpack('C*', substr($raw, 12)));
+            if (($selection & 128) !== 0) {
+                if (($selection & 127) !== count($indices)) {
+                    return null;
+                }
+            } elseif (count($indices) !== 2) {
+                return null;
+            }
+            foreach ($indices as $index) {
+                if ($index < 1 || $index > $segments) {
+                    return null;
+                }
+            }
+            $description = 'DP61: letzte Segmentfarbe (' . implode(($selection & 128) ? ', ' : ' bis ', $indices) . ')';
+        } else {
+            // Eraser, combinations and unknown layouts are not a global RGB colour.
+            return null;
+        }
+        return ['hsv' => sprintf('%04x%04x%04x', $hsv['h'], $hsv['s'], $hsv['v']), 'description' => $description];
     }
 
     private function offline(string $msg): void

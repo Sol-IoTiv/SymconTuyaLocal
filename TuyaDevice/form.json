@@ -1,5 +1,7 @@
 {
   "elements": [
+    { "type": "CheckBox", "name": "SyncPaintDP61", "caption": "Dreamcolor DP61 verwenden (Anzeige: letzte Auswahl; Bedienung: gesamtes Band)" },
+    { "type": "CheckBox", "name": "RGBBrightnessDP24", "caption": "RGB-Helligkeit über Farb-Datenpunkt 24 steuern (Farbton und Sättigung erhalten)" },
     { "type": "ValidationTextBox", "name": "DeviceID", "caption": "Geräte-ID" },
     { "type": "PasswordTextBox", "name": "LocalKey", "caption": "Local Key" },
     { "type": "ValidationTextBox", "name": "Host", "caption": "IP-Adresse (leer = per MAC suchen)" },

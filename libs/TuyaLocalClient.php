@@ -32,7 +32,7 @@ class TuyaLocalClient
         throw new Exception('Protokollversion nicht erkannt (Key, IP oder Gerät prüfen)');
     }
 
-    public function query(): array
+    public function query(array $refreshDPs = []): array
     {
         $this->open();
         try {
@@ -42,13 +42,29 @@ class TuyaLocalClient
             } else {
                 $this->send(16, $json);
             }
+            $result = [];
             foreach ($this->read(3.0, $this->version === '3.3' ? 10 : 16) as $m) {
                 $j = json_decode($m['data'], true);
-                if (isset($j['dps'])) {
-                    return $j['dps'];
+                $dp = $j['data']['dps'] ?? $j['dps'] ?? null;
+                if (is_array($dp)) {
+                    $result = array_replace($result, $dp);
                 }
             }
-            throw new Exception('Keine Statusantwort');
+            if ($refreshDPs !== []) {
+                // UPDATEDPS (18) requests reports; it never assigns actuator values.
+                $this->send(18, json_encode(['dpId' => array_values($refreshDPs)]));
+                foreach ($this->read(1.5, null) as $m) {
+                    $j = json_decode($m['data'], true);
+                    $dp = $j['data']['dps'] ?? $j['dps'] ?? null;
+                    if (is_array($dp)) {
+                        $result = array_replace($result, $dp);
+                    }
+                }
+            }
+            if ($result === []) {
+                throw new Exception('Keine Statusantwort');
+            }
+            return $result;
         } finally {
             $this->close();
         }
